@@ -1,29 +1,27 @@
-# Vim
-*~
-*.sw[p_]
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# Sublime Text
-*.sublime-project
-*.sublime-workspace
+# dependencies
+/node_modules
 
-# Ruby Gem
-*.gem
-.bundle
-Gemfile.lock
-**/vendor/bundle
+# next.js
+/.next/
+/out/
 
-# Node.js and NPM
-node_modules
+# production
+/build
+
+# debug
 npm-debug.log*
-package-lock.json
-codekit-config.json
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# macOS
-.DS_Store
+# env files
+.env*
 
-# Jekyll generated files
-.jekyll-cache
-.jekyll-metadata
-.sass-cache
-_asset_bundler_cache
-_site
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
