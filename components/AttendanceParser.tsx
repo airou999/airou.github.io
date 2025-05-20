@@ -15,7 +15,23 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination"
-import { Loader2, InfoIcon, Calendar, FileText, BarChart3, Settings, Plus, Trash2 } from "lucide-react"
+import {
+  Loader2,
+  InfoIcon,
+  Calendar,
+  FileText,
+  BarChart3,
+  Settings,
+  Plus,
+  Trash2,
+  AlertTriangle,
+  FileDown,
+  CalendarDays,
+  TableIcon,
+  FileIcon as FilePdf,
+  FileSpreadsheet,
+  BookOpen,
+} from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -24,25 +40,62 @@ import { formatToUKDisplayDate, parseISODate } from "@/utils/date-utils"
 import { ColorPicker } from "@/components/ui/color-picker"
 import { LegendPresets, type Legend as LegendType } from "@/components/legend-presets"
 import AttendanceChart from "./AttendanceChart"
+import AttendanceCalendar from "./AttendanceCalendar"
+import AnomalyReport, { type Anomaly } from "./AnomalyReport"
+import AttendanceCodeReference from "./AttendanceCodeReference"
 import { motion } from "framer-motion"
+import { useToast } from "@/hooks/use-toast"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { exportToPDF } from "./export-pdf"
+import { getCodeDescription } from "@/utils/attendance-code-utils"
 
 // Add React.memo to optimize rendering of table rows
-// Add this at the top of the file after the imports:
 const MemoizedTableRow = React.memo(
-  ({ week, legend }: { week: WeekData; legend: Legend }) => (
-    <TableRow>
-      <TableCell className="font-medium">{week.weekStart}</TableCell>
-      {week.weekMarks.map((mark, idx) => (
-        <TableCell
-          key={idx}
-          className={`${legend[mark]?.color || ""} dark:bg-opacity-20 text-center`}
-          title={legend[mark]?.label || mark}
-        >
-          {mark}
-        </TableCell>
-      ))}
-    </TableRow>
-  ),
+  ({ week, legend }: { week: WeekData; legend: Legend }) => {
+    // Helper function to get full description for a code
+    const getFullDescription = (mark: string) => {
+      if (!mark) return ""
+      const standardDescription = getCodeDescription(mark)
+      const customDescription = legend[mark]?.label
+
+      if (standardDescription && customDescription && standardDescription !== customDescription) {
+        return `${customDescription} (${standardDescription})`
+      }
+
+      return standardDescription || customDescription || mark
+    }
+
+    return (
+      <TableRow>
+        <TableCell className="font-medium">{week.weekStart}</TableCell>
+        {week.weekMarks.map((mark, idx) => (
+          <TableCell key={idx} className={`${legend[mark]?.color || ""} dark:bg-opacity-20 text-center cursor-help`}>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger className="w-full h-full block" asChild>
+                  <span>{mark}</span>
+                </TooltipTrigger>
+                <TooltipContent side="top" align="center" className="max-w-xs">
+                  {mark ? (
+                    <div className="space-y-1">
+                      <div className="font-medium">
+                        <span className="font-mono">{mark}</span> - {legend[mark]?.label || "Unknown Code"}
+                      </div>
+                      {getCodeDescription(mark) && getCodeDescription(mark) !== legend[mark]?.label && (
+                        <div className="text-sm text-muted-foreground">Standard: {getCodeDescription(mark)}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <span>No data</span>
+                  )}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </TableCell>
+        ))}
+      </TableRow>
+    )
+  },
   (prevProps, nextProps) => {
     // Only re-render if week data or legend for used marks changes
     return (
@@ -82,11 +135,10 @@ const AttendanceParser: React.FC = () => {
   const [newSymbol, setNewSymbol] = useState<string>("")
   const [newLabel, setNewLabel] = useState<string>("")
   const [newColor, setNewColor] = useState<string>("bg-gray-100")
-  // Replace this line:
-  // const itemsPerPage = 4 // Number of weeks to display per page
-
-  // With this dynamic calculation:
   const [itemsPerPage, setItemsPerPage] = useState<number>(4)
+  const [anomalies, setAnomalies] = useState<Anomaly[]>([])
+  const [stats, setStats] = useState<any>(null)
+  const [dataViewMode, setDataViewMode] = useState<"table" | "calendar">("table")
 
   // Updated legend with correct definitions
   const [legend, setLegend] = useState<Legend>({
@@ -94,6 +146,68 @@ const AttendanceParser: React.FC = () => {
     "/": { label: "Morning Present", color: "bg-yellow-100" },
     "\\": { label: "Afternoon Present", color: "bg-blue-100" },
   })
+
+  const { toast } = useToast()
+
+  // Format the displayed date in UK format
+  const formatDisplayDate = (isoDate: string) => {
+    try {
+      const date = new Date(isoDate)
+      return formatToUKDisplayDate(date)
+    } catch (e) {
+      return isoDate
+    }
+  }
+
+  // Calculate attendance statistics for the current view
+  const calculateAttendanceStats = useCallback(() => {
+    if (!parsedAttendance.length) return null
+
+    let totalDays = 0
+    let fullDaysPresent = 0
+    let halfDaysPresent = 0
+    let schoolClosedDays = 0
+
+    // Process each week
+    parsedAttendance.forEach((week) => {
+      // Process each day (2 sessions per day)
+      for (let i = 0; i < week.weekMarks.length; i += 2) {
+        const morningMark = week.weekMarks[i]
+        const afternoonMark = week.weekMarks[i + 1]
+
+        if (!morningMark && !afternoonMark) continue
+
+        totalDays++
+
+        // School closed
+        if (morningMark === "#" && afternoonMark === "#") {
+          schoolClosedDays++
+        }
+        // Full day present
+        else if (morningMark === "/" && afternoonMark === "\\") {
+          fullDaysPresent++
+        }
+        // Half day present (either morning or afternoon)
+        else if (morningMark === "/" || afternoonMark === "\\") {
+          halfDaysPresent++
+        }
+      }
+    })
+
+    const attendanceStats = {
+      totalDays,
+      fullDaysPresent,
+      halfDaysPresent,
+      schoolClosedDays,
+      attendanceDays: totalDays - schoolClosedDays,
+      attendanceRate:
+        totalDays - schoolClosedDays > 0
+          ? (((fullDaysPresent + halfDaysPresent * 0.5) / (totalDays - schoolClosedDays)) * 100).toFixed(1)
+          : "N/A",
+    }
+
+    return attendanceStats
+  }, [parsedAttendance])
 
   // Add this function after the other useCallback functions
   const calculatePaginationNeeds = useCallback(() => {
@@ -123,7 +237,6 @@ const AttendanceParser: React.FC = () => {
   }, [parsedAttendance.length, startDate, endDate])
 
   // Update displayed data when page changes or parsed data changes
-  // Replace the existing useEffect with this:
   useEffect(() => {
     if (parsedAttendance.length > 0) {
       // Calculate if pagination is needed based on date range
@@ -201,6 +314,21 @@ const AttendanceParser: React.FC = () => {
       "#": { label: "School Closed", color: "bg-gray-100" },
       "/": { label: "Morning Present", color: "bg-yellow-100" },
       "\\": { label: "Afternoon Present", color: "bg-blue-100" },
+      L: { label: "Late (marked as present)", color: "bg-green-100" },
+      C: { label: "Authorised Absence", color: "bg-green-200" },
+      E: { label: "Excluded", color: "bg-green-200" },
+      I: { label: "Illness", color: "bg-green-200" },
+      M: { label: "Medical Appointment", color: "bg-green-200" },
+      R: { label: "Religious Observance", color: "bg-green-200" },
+      B: { label: "Educated Off Site", color: "bg-yellow-200" },
+      P: { label: "Sporting Activity", color: "bg-yellow-200" },
+      V: { label: "Educational Visit", color: "bg-yellow-200" },
+      G: { label: "Unauthorised Holiday", color: "bg-red-100" },
+      O: { label: "Unauthorised Absence", color: "bg-red-100" },
+      N: { label: "Reason Not Yet Provided", color: "bg-red-100" },
+      U: { label: "Late After Register Closed", color: "bg-red-100" },
+      X: { label: "Not Required to Attend", color: "bg-blue-100" },
+      Y: { label: "Unable to Attend", color: "bg-blue-100" },
     }
 
     // Create a new legend with detected symbols
@@ -228,6 +356,120 @@ const AttendanceParser: React.FC = () => {
 
     setLegend(newLegend)
   }, [attendanceString, legend])
+
+  // New function to detect anomalies in attendance data
+  const detectAnomalies = useCallback(
+    (marks: string[], start_date: Date, end_date: Date): Anomaly[] => {
+      const detectedAnomalies: Anomaly[] = []
+
+      // Check for empty attendance string
+      if (marks.length === 0) {
+        detectedAnomalies.push({
+          type: "error",
+          message: "Empty attendance data",
+          details: "The attendance string contains no data.",
+          suggestion: "Please enter attendance data in the format '#,#,/,\\,/,\\,#,#'.",
+        })
+        return detectedAnomalies
+      }
+
+      // Check for unknown symbols
+      const uniqueSymbols = Array.from(new Set(marks)).filter((s) => s.trim() !== "")
+      const unknownSymbols = uniqueSymbols.filter((symbol) => !legend[symbol])
+
+      if (unknownSymbols.length > 0) {
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Unknown attendance symbols detected",
+          details: `Found ${unknownSymbols.length} symbols that are not defined in the legend: ${unknownSymbols.join(", ")}`,
+          suggestion: "Add these symbols to your legend or check for typos in your attendance data.",
+        })
+      }
+
+      // Check for inconsistent data length
+      const daysInRange = Math.round((end_date.getTime() - start_date.getTime()) / (1000 * 60 * 60 * 24)) + 1
+      const expectedMarks = daysInRange * 2 // 2 sessions per day
+
+      if (marks.length < expectedMarks) {
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Incomplete attendance data",
+          details: `Expected ${expectedMarks} attendance marks for the date range, but found only ${marks.length}.`,
+          suggestion: "Check if your attendance data covers the entire date range specified.",
+        })
+      } else if (marks.length > expectedMarks) {
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Excess attendance data",
+          details: `Expected ${expectedMarks} attendance marks for the date range, but found ${marks.length}.`,
+          suggestion: "Check if your date range is correct or if there are duplicate entries in your data.",
+        })
+      }
+
+      // Check for impossible combinations (e.g., school closed for morning but open for afternoon)
+      for (let i = 0; i < marks.length; i += 2) {
+        const morningMark = marks[i]
+        const afternoonMark = marks[i + 1]
+
+        if (i + 1 >= marks.length) continue // Skip if no afternoon mark
+
+        // School closed in morning but open in afternoon
+        if (morningMark === "#" && afternoonMark !== "#") {
+          const dayIndex = Math.floor(i / 2)
+          const anomalyDate = new Date(start_date)
+          anomalyDate.setDate(start_date.getDate() + dayIndex)
+
+          detectedAnomalies.push({
+            type: "error",
+            message: "Inconsistent school closure",
+            details: "School is marked as closed in the morning but open in the afternoon.",
+            date: anomalyDate.toISOString().split("T")[0],
+            suggestion: "School closure typically applies to the entire day. Check if this is correct.",
+          })
+        }
+      }
+
+      // Check for unusual patterns
+      let consecutiveAbsences = 0
+      for (let i = 0; i < marks.length; i += 2) {
+        const morningMark = marks[i]
+        const afternoonMark = marks[i + 1]
+
+        // Skip weekends and holidays
+        if (morningMark === "#" && afternoonMark === "#") {
+          consecutiveAbsences = 0
+          continue
+        }
+
+        // Check for absence
+        if (morningMark !== "/" && afternoonMark !== "\\") {
+          consecutiveAbsences++
+
+          if (consecutiveAbsences >= 3) {
+            const dayIndex = Math.floor(i / 2) - 2 // Start of the consecutive absences
+            const anomalyDate = new Date(start_date)
+            anomalyDate.setDate(start_date.getDate() + dayIndex)
+
+            detectedAnomalies.push({
+              type: "info",
+              message: "Extended absence detected",
+              details: `Found ${consecutiveAbsences} consecutive days of absence.`,
+              date: anomalyDate.toISOString().split("T")[0],
+              suggestion: "Check if this extended absence is correctly recorded.",
+            })
+
+            // Reset to avoid duplicate alerts
+            consecutiveAbsences = 0
+          }
+        } else {
+          consecutiveAbsences = 0
+        }
+      }
+
+      return detectedAnomalies
+    },
+    [legend],
+  )
 
   const splitMarksIntoCalendarWeeks = useCallback((marks: string[], start_date: Date, end_date: Date): WeekData[] => {
     try {
@@ -280,6 +522,7 @@ const AttendanceParser: React.FC = () => {
     setIsLoading(true)
     setError(null)
     setCurrentPage(1)
+    setAnomalies([]) // Reset anomalies
 
     try {
       // Use setTimeout to allow the UI to update before heavy processing
@@ -302,6 +545,10 @@ const AttendanceParser: React.FC = () => {
             throw new Error("Start date must be before end date")
           }
 
+          // Detect anomalies
+          const detectedAnomalies = detectAnomalies(marks, start_date, end_date)
+          setAnomalies(detectedAnomalies)
+
           const weeks = splitMarksIntoCalendarWeeks(marks, start_date, end_date)
           setParsedAttendance(weeks)
 
@@ -319,6 +566,10 @@ const AttendanceParser: React.FC = () => {
           // Switch to the data tab after successful parsing
           setActiveTab("data")
           setIsLoading(false)
+
+          // Calculate attendance statistics
+          const attendanceStats = calculateAttendanceStats()
+          setStats(attendanceStats)
         } catch (error) {
           console.error("Error parsing attendance:", error)
           setError(error instanceof Error ? error.message : "An unknown error occurred")
@@ -340,108 +591,140 @@ const AttendanceParser: React.FC = () => {
     autoDetectLegend,
     legend,
     calculatePaginationNeeds,
+    detectAnomalies,
+    calculateAttendanceStats,
   ])
 
   const exportToCSV = useCallback(() => {
     try {
+      // Create header row
       const header = [
         "Week Start Date",
         "Mon AM",
+        "Mon AM Code",
+        "Mon AM Description",
         "Mon PM",
+        "Mon PM Code",
+        "Mon PM Description",
         "Tue AM",
+        "Tue AM Code",
+        "Tue AM Description",
         "Tue PM",
+        "Tue PM Code",
+        "Tue PM Description",
         "Wed AM",
+        "Wed AM Code",
+        "Wed AM Description",
         "Wed PM",
+        "Wed PM Code",
+        "Wed PM Description",
         "Thu AM",
+        "Thu AM Code",
+        "Thu AM Description",
         "Thu PM",
+        "Thu PM Code",
+        "Thu PM Description",
         "Fri AM",
+        "Fri AM Code",
+        "Fri AM Description",
         "Fri PM",
+        "Fri PM Code",
+        "Fri PM Description",
         "Sat AM",
+        "Sat AM Code",
+        "Sat AM Description",
         "Sat PM",
+        "Sat PM Code",
+        "Sat PM Description",
         "Sun AM",
+        "Sun AM Code",
+        "Sun AM Description",
         "Sun PM",
+        "Sun PM Code",
+        "Sun PM Description",
       ]
 
+      // Create data rows
       const rows = parsedAttendance.map((week) => {
-        return [week.weekStart, ...week.weekMarks.map((mark) => legend[mark]?.label || mark)]
+        const row = [week.weekStart]
+
+        // For each mark, add the code, custom label, and standard description
+        week.weekMarks.forEach((mark) => {
+          const customLabel = legend[mark]?.label || ""
+          const standardDesc = getCodeDescription(mark) || ""
+          row.push(customLabel, mark, standardDesc)
+        })
+
+        return row
       })
 
-      const csvContent = [header, ...rows].map((row) => row.join(",")).join("\n")
+      // Create CSV content
+      const csvContent = [header, ...rows]
+        .map((row) =>
+          row
+            .map((cell) => {
+              // Escape commas and quotes
+              const cellStr = String(cell || "")
+              if (cellStr.includes(",") || cellStr.includes('"') || cellStr.includes("\n")) {
+                return `"${cellStr.replace(/"/g, '""')}"`
+              }
+              return cellStr
+            })
+            .join(","),
+        )
+        .join("\n")
 
+      // Create and download the file
       const blob = new Blob([csvContent], { type: "text/csv" })
       const link = document.createElement("a")
       link.href = URL.createObjectURL(blob)
       link.download = "attendance_data.csv"
       link.click()
+
+      toast({
+        title: "CSV Export Successful",
+        description: "Your attendance data has been downloaded as a CSV file",
+      })
     } catch (error) {
       console.error("Error exporting to CSV:", error)
       setError("Failed to export data to CSV")
+      toast({
+        variant: "destructive",
+        title: "Export Failed",
+        description: "There was an error creating the CSV file",
+      })
     }
-  }, [parsedAttendance, legend])
+  }, [parsedAttendance, legend, toast])
+
+  // Handle PDF export using the exportToPDF function
+  const handleExportToPDF = useCallback(() => {
+    exportToPDF({
+      parsedAttendance,
+      legend,
+      startDate,
+      endDate,
+      stats,
+      onSuccess: () => {
+        toast({
+          title: "PDF Export Successful",
+          description: "Your attendance report has been downloaded as a PDF",
+        })
+      },
+      onError: (error) => {
+        console.error("Error exporting to PDF:", error)
+        setError("Failed to export data to PDF")
+        toast({
+          variant: "destructive",
+          title: "Export Failed",
+          description: "There was an error creating the PDF file",
+        })
+      },
+    })
+  }, [parsedAttendance, legend, startDate, endDate, stats, toast])
 
   const handlePageChange = (page: number) => {
     if (page < 1 || page > totalPages) return
     setCurrentPage(page)
-  }
-
-  // Calculate attendance statistics for the current view
-  const calculateAttendanceStats = useCallback(() => {
-    if (!parsedAttendance.length) return null
-
-    let totalDays = 0
-    let fullDaysPresent = 0
-    let halfDaysPresent = 0
-    let schoolClosedDays = 0
-
-    // Process each week
-    parsedAttendance.forEach((week) => {
-      // Process each day (2 sessions per day)
-      for (let i = 0; i < week.weekMarks.length; i += 2) {
-        const morningMark = week.weekMarks[i]
-        const afternoonMark = week.weekMarks[i + 1]
-
-        if (!morningMark && !afternoonMark) continue
-
-        totalDays++
-
-        // School closed
-        if (morningMark === "#" && afternoonMark === "#") {
-          schoolClosedDays++
-        }
-        // Full day present
-        else if (morningMark === "/" && afternoonMark === "\\") {
-          fullDaysPresent++
-        }
-        // Half day present (either morning or afternoon)
-        else if (morningMark === "/" || afternoonMark === "\\") {
-          halfDaysPresent++
-        }
-      }
-    })
-
-    return {
-      totalDays,
-      fullDaysPresent,
-      halfDaysPresent,
-      schoolClosedDays,
-      attendanceDays: totalDays - schoolClosedDays,
-      attendanceRate:
-        totalDays - schoolClosedDays > 0
-          ? (((fullDaysPresent + halfDaysPresent * 0.5) / (totalDays - schoolClosedDays)) * 100).toFixed(1)
-          : "N/A",
-    }
-  }, [parsedAttendance])
-
-  const stats = calculateAttendanceStats()
-
-  // Format the displayed date in UK format
-  const formatDisplayDate = (isoDate: string) => {
-    try {
-      const date = new Date(isoDate)
-      return formatToUKDisplayDate(date)
-    } catch (e) {
-      return isoDate
-    }
   }
 
   return (
@@ -453,7 +736,7 @@ const AttendanceParser: React.FC = () => {
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
         <div className="flex items-center justify-between">
-          <TabsList className="grid w-full max-w-md grid-cols-4">
+          <TabsList className="grid w-full max-w-md grid-cols-5">
             <TabsTrigger value="input" className="flex items-center gap-2">
               <FileText className="h-4 w-4" />
               <span className="hidden sm:inline">Input</span>
@@ -466,17 +749,30 @@ const AttendanceParser: React.FC = () => {
               <BarChart3 className="h-4 w-4" />
               <span className="hidden sm:inline">Analytics</span>
             </TabsTrigger>
+            <TabsTrigger value="reference" className="flex items-center gap-2">
+              <BookOpen className="h-4 w-4" />
+              <span className="hidden sm:inline">Codes</span>
+            </TabsTrigger>
             <TabsTrigger value="settings" className="flex items-center gap-2">
               <Settings className="h-4 w-4" />
               <span className="hidden sm:inline">Settings</span>
             </TabsTrigger>
           </TabsList>
 
-          {parsedAttendance.length > 0 && (
-            <Button variant="outline" onClick={exportToCSV} disabled={isLoading} className="hidden md:flex">
-              Export to CSV
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {parsedAttendance.length > 0 && anomalies.length > 0 && (
+              <Button variant="outline" onClick={() => setActiveTab("anomalies")} className="relative">
+                <AlertTriangle className="h-4 w-4 mr-2" />
+                <span className="hidden sm:inline">Anomalies</span>
+                <Badge
+                  variant="destructive"
+                  className="absolute -top-2 -right-2 h-5 w-5 p-0 flex items-center justify-center"
+                >
+                  {anomalies.length}
+                </Badge>
+              </Button>
+            )}
+          </div>
         </div>
 
         <TabsContent value="input" className="space-y-6">
@@ -611,6 +907,11 @@ const AttendanceParser: React.FC = () => {
                   <p className="text-xs text-muted-foreground">Student attended both morning and afternoon classes</p>
                 </div>
               </div>
+              <div className="mt-4 text-center">
+                <Button variant="link" onClick={() => setActiveTab("reference")}>
+                  View full attendance code reference
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -664,102 +965,147 @@ const AttendanceParser: React.FC = () => {
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <CardTitle>Attendance Data</CardTitle>
-                  {/* Replace the existing info text with this: */}
-                  <div className="text-sm text-muted-foreground">
-                    {totalPages > 1 ? (
-                      <>
-                        Showing {(currentPage - 1) * itemsPerPage + 1} -{" "}
-                        {Math.min(currentPage * itemsPerPage, parsedAttendance.length)} of {parsedAttendance.length}{" "}
-                        weeks
-                      </>
-                    ) : (
-                      <>
-                        Showing {parsedAttendance.length} {parsedAttendance.length === 1 ? "week" : "weeks"}
-                      </>
-                    )}
+                  <div className="flex items-center gap-4">
+                    <div className="text-sm text-muted-foreground mr-2">
+                      {totalPages > 1 ? (
+                        <>
+                          Showing {(currentPage - 1) * itemsPerPage + 1} -{" "}
+                          {Math.min(currentPage * itemsPerPage, parsedAttendance.length)} of {parsedAttendance.length}{" "}
+                          weeks
+                        </>
+                      ) : (
+                        <>
+                          Showing {parsedAttendance.length} {parsedAttendance.length === 1 ? "week" : "weeks"}
+                        </>
+                      )}
+                    </div>
+                    <div className="flex items-center border rounded-md overflow-hidden">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={`rounded-none px-3 ${dataViewMode === "table" ? "bg-muted" : ""}`}
+                        onClick={() => setDataViewMode("table")}
+                      >
+                        <TableIcon className="h-4 w-4 mr-1" />
+                        <span className="hidden sm:inline">Table</span>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={`rounded-none px-3 ${dataViewMode === "calendar" ? "bg-muted" : ""}`}
+                        onClick={() => setDataViewMode("calendar")}
+                      >
+                        <CalendarDays className="h-4 w-4 mr-1" />
+                        <span className="hidden sm:inline">Calendar</span>
+                      </Button>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="font-medium">Week Start Date</TableHead>
-                          <TableHead className="font-medium">Mon AM</TableHead>
-                          <TableHead className="font-medium">Mon PM</TableHead>
-                          <TableHead className="font-medium">Tue AM</TableHead>
-                          <TableHead className="font-medium">Tue PM</TableHead>
-                          <TableHead className="font-medium">Wed AM</TableHead>
-                          <TableHead className="font-medium">Wed PM</TableHead>
-                          <TableHead className="font-medium">Thu AM</TableHead>
-                          <TableHead className="font-medium">Thu PM</TableHead>
-                          <TableHead className="font-medium">Fri AM</TableHead>
-                          <TableHead className="font-medium">Fri PM</TableHead>
-                          <TableHead className="font-medium">Sat AM</TableHead>
-                          <TableHead className="font-medium">Sat PM</TableHead>
-                          <TableHead className="font-medium">Sun AM</TableHead>
-                          <TableHead className="font-medium">Sun PM</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      {/* Then update the table body to use the memoized component: */}
-                      <TableBody>
-                        {displayedData.map((week, index) => (
-                          <MemoizedTableRow key={index} week={week} legend={legend} />
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
+                  {dataViewMode === "table" ? (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="font-medium">Week Start Date</TableHead>
+                            <TableHead className="font-medium">Mon AM</TableHead>
+                            <TableHead className="font-medium">Mon PM</TableHead>
+                            <TableHead className="font-medium">Tue AM</TableHead>
+                            <TableHead className="font-medium">Tue PM</TableHead>
+                            <TableHead className="font-medium">Wed AM</TableHead>
+                            <TableHead className="font-medium">Wed PM</TableHead>
+                            <TableHead className="font-medium">Thu AM</TableHead>
+                            <TableHead className="font-medium">Thu PM</TableHead>
+                            <TableHead className="font-medium">Fri AM</TableHead>
+                            <TableHead className="font-medium">Fri PM</TableHead>
+                            <TableHead className="font-medium">Sat AM</TableHead>
+                            <TableHead className="font-medium">Sat PM</TableHead>
+                            <TableHead className="font-medium">Sun AM</TableHead>
+                            <TableHead className="font-medium">Sun PM</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {displayedData.map((week, index) => (
+                            <MemoizedTableRow key={index} week={week} legend={legend} />
+                          ))}
+                        </TableBody>
+                      </Table>
 
-                  {/* Replace the pagination section with this: */}
-                  {totalPages > 1 && (
-                    <Pagination className="mt-4">
-                      <PaginationContent>
-                        <PaginationItem>
-                          <PaginationPrevious
-                            onClick={() => handlePageChange(currentPage - 1)}
-                            className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                          />
-                        </PaginationItem>
-
-                        {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                          // Show pages around current page
-                          let pageToShow
-                          if (totalPages <= 5) {
-                            pageToShow = i + 1
-                          } else if (currentPage <= 3) {
-                            pageToShow = i + 1
-                          } else if (currentPage >= totalPages - 2) {
-                            pageToShow = totalPages - 4 + i
-                          } else {
-                            pageToShow = currentPage - 2 + i
-                          }
-
-                          return (
-                            <PaginationItem key={i}>
-                              <PaginationLink
-                                onClick={() => handlePageChange(pageToShow)}
-                                isActive={currentPage === pageToShow}
-                              >
-                                {pageToShow}
-                              </PaginationLink>
+                      {totalPages > 1 && (
+                        <Pagination className="mt-4">
+                          <PaginationContent>
+                            <PaginationItem>
+                              <PaginationPrevious
+                                onClick={() => handlePageChange(currentPage - 1)}
+                                className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                              />
                             </PaginationItem>
-                          )
-                        })}
 
-                        <PaginationItem>
-                          <PaginationNext
-                            onClick={() => handlePageChange(currentPage + 1)}
-                            className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                          />
-                        </PaginationItem>
-                      </PaginationContent>
-                    </Pagination>
+                            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                              // Show pages around current page
+                              let pageToShow
+                              if (totalPages <= 5) {
+                                pageToShow = i + 1
+                              } else if (currentPage <= 3) {
+                                pageToShow = i + 1
+                              } else if (currentPage >= totalPages - 2) {
+                                pageToShow = totalPages - 4 + i
+                              } else {
+                                pageToShow = currentPage - 2 + i
+                              }
+
+                              return (
+                                <PaginationItem key={i}>
+                                  <PaginationLink
+                                    onClick={() => handlePageChange(pageToShow)}
+                                    isActive={currentPage === pageToShow}
+                                  >
+                                    {pageToShow}
+                                  </PaginationLink>
+                                </PaginationItem>
+                              )
+                            })}
+
+                            <PaginationItem>
+                              <PaginationNext
+                                onClick={() => handlePageChange(currentPage + 1)}
+                                className={
+                                  currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"
+                                }
+                              />
+                            </PaginationItem>
+                          </PaginationContent>
+                        </Pagination>
+                      )}
+                    </div>
+                  ) : (
+                    <AttendanceCalendar
+                      parsedAttendance={parsedAttendance}
+                      legend={legend}
+                      startDate={startDate}
+                      endDate={endDate}
+                    />
                   )}
                 </CardContent>
-                <CardFooter className="flex justify-end">
-                  <Button variant="outline" onClick={exportToCSV} disabled={isLoading} className="md:hidden">
-                    Export to CSV
-                  </Button>
+                <CardFooter className="flex justify-end gap-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" className="flex items-center gap-2">
+                        <FileDown className="h-4 w-4" />
+                        <span>Export</span>
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={handleExportToPDF} className="flex items-center gap-2 cursor-pointer">
+                        <FilePdf className="h-4 w-4" />
+                        <span>Export to PDF</span>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={exportToCSV} className="flex items-center gap-2 cursor-pointer">
+                        <FileSpreadsheet className="h-4 w-4" />
+                        <span>Export to CSV</span>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </CardFooter>
               </Card>
             </motion.div>
@@ -770,6 +1116,18 @@ const AttendanceParser: React.FC = () => {
           {parsedAttendance.length > 0 && (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
               <AttendanceChart parsedAttendance={parsedAttendance} legend={legend} />
+            </motion.div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="reference" className="space-y-6">
+          <AttendanceCodeReference />
+        </TabsContent>
+
+        <TabsContent value="anomalies" className="space-y-6">
+          {parsedAttendance.length > 0 && (
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
+              <AnomalyReport anomalies={anomalies} />
             </motion.div>
           )}
         </TabsContent>
@@ -883,6 +1241,22 @@ const AttendanceParser: React.FC = () => {
           </Card>
         </TabsContent>
       </Tabs>
+      {activeTab === "anomalies" && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+          className="space-y-6"
+        >
+          <div className="flex justify-between items-center">
+            <h2 className="text-2xl font-bold tracking-tight">Anomaly Report</h2>
+            <Button variant="ghost" onClick={() => setActiveTab("data")}>
+              Back to Data
+            </Button>
+          </div>
+          <AnomalyReport anomalies={anomalies} />
+        </motion.div>
+      )}
     </div>
   )
 }

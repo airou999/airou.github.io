@@ -166,3 +166,80 @@
 .dark .bg-stone-100 {
   background-color: rgba(231, 229, 228, 0.2);
 }
+
+/* Custom scrollbar styles */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: var(--muted);
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary) / 0.5);
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.7);
+}
+
+/* Apply custom scrollbar to all ScrollArea components */
+[data-radix-scroll-area-viewport]::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-radix-scroll-area-viewport]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary) / 0.3);
+  border-radius: 4px;
+}
+
+[data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.5);
+}
+
+/* Fix tab layout issues */
+[role="tablist"] {
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+[role="tab"] {
+  flex: 1;
+  text-align: center;
+  white-space: nowrap;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  position: relative;
+  z-index: 1;
+}
+
+[role="tab"][data-state="active"] {
+  background-color: transparent;
+  border-bottom: 2px solid hsl(var(--primary));
+  font-weight: 500;
+}
+
+/* Ensure no shadows or backgrounds on tabs */
+[role="tablist"]::before,
+[role="tablist"]::after,
+[role="tab"]::before,
+[role="tab"]::after {
+  display: none !important;
+  content: none !important;
+  box-shadow: none !important;
+  background: none !important;
+}
