@@ -124,7 +124,7 @@ interface WeekData {
 const AttendanceParser: React.FC = () => {
   const [attendanceString, setAttendanceString] = useState<string>("#,#,#,#,#,#,/,\\,/,\\,/,\\,#,#,#,#")
   const [startDate, setStartDate] = useState<string>("2024-09-01")
-  const [endDate, setEndDate] = useState<string>("2024-09-15")
+  const [endDate, setEndDate] = useState<string>(new Date().toISOString().split("T")[0])
   const [parsedAttendance, setParsedAttendance] = useState<WeekData[]>([])
   const [isLoading, setIsLoading] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
@@ -255,6 +255,18 @@ const AttendanceParser: React.FC = () => {
     }
   }, [currentPage, parsedAttendance, itemsPerPage, calculatePaginationNeeds])
 
+  // Auto-update end date to today's date on component mount
+  useEffect(() => {
+    const today = new Date().toISOString().split("T")[0]
+    // Only update if the current end date is the default or in the past
+    const currentEndDate = new Date(endDate)
+    const todayDate = new Date(today)
+
+    if (currentEndDate < todayDate) {
+      setEndDate(today)
+    }
+  }, []) // Empty dependency array means this runs only once on mount
+
   const handleLegendChange = useCallback((symbol: string, field: keyof LegendItem, value: string) => {
     setLegend((prev) => ({
       ...prev,
@@ -366,11 +378,35 @@ const AttendanceParser: React.FC = () => {
       if (marks.length === 0) {
         detectedAnomalies.push({
           type: "error",
-          message: "Empty attendance data",
-          details: "The attendance string contains no data.",
-          suggestion: "Please enter attendance data in the format '#,#,/,\\,/,\\,#,#'.",
+          message: "No attendance data found",
+          details: "Your attendance string is empty.",
+          suggestion: "Add some attendance codes like: #,#,/,\\,/,\\",
         })
         return detectedAnomalies
+      }
+
+      // Calculate expected data length based on date range
+      const daysInRange = Math.round((end_date.getTime() - start_date.getTime()) / (1000 * 60 * 60 * 24)) + 1
+      const expectedMarks = daysInRange * 2 // 2 sessions per day (AM/PM)
+      const actualMarks = marks.length
+
+      // Smart length validation with helpful messages
+      if (actualMarks < expectedMarks) {
+        const missingDays = Math.ceil((expectedMarks - actualMarks) / 2)
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Not enough attendance data",
+          details: `You have ${actualMarks} codes but need ${expectedMarks} for your date range. Missing about ${missingDays} days.`,
+          suggestion: "Add more codes or adjust your end date.",
+        })
+      } else if (actualMarks > expectedMarks) {
+        const extraDays = Math.ceil((actualMarks - expectedMarks) / 2)
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Too much attendance data",
+          details: `You have ${actualMarks} codes but only need ${expectedMarks} for your date range. About ${extraDays} extra days.`,
+          suggestion: "Remove extra codes or extend your end date.",
+        })
       }
 
       // Check for unknown symbols
@@ -380,38 +416,18 @@ const AttendanceParser: React.FC = () => {
       if (unknownSymbols.length > 0) {
         detectedAnomalies.push({
           type: "warning",
-          message: "Unknown attendance symbols detected",
-          details: `Found ${unknownSymbols.length} symbols that are not defined in the legend: ${unknownSymbols.join(", ")}`,
-          suggestion: "Add these symbols to your legend or check for typos in your attendance data.",
+          message: "Unknown codes found",
+          details: `These codes aren't in your legend: ${unknownSymbols.join(", ")}`,
+          suggestion: "Add them to your legend or check for typos.",
         })
       }
 
-      // Check for inconsistent data length
-      const daysInRange = Math.round((end_date.getTime() - start_date.getTime()) / (1000 * 60 * 60 * 24)) + 1
-      const expectedMarks = daysInRange * 2 // 2 sessions per day
-
-      if (marks.length < expectedMarks) {
-        detectedAnomalies.push({
-          type: "warning",
-          message: "Incomplete attendance data",
-          details: `Expected ${expectedMarks} attendance marks for the date range, but found only ${marks.length}.`,
-          suggestion: "Check if your attendance data covers the entire date range specified.",
-        })
-      } else if (marks.length > expectedMarks) {
-        detectedAnomalies.push({
-          type: "warning",
-          message: "Excess attendance data",
-          details: `Expected ${expectedMarks} attendance marks for the date range, but found ${marks.length}.`,
-          suggestion: "Check if your date range is correct or if there are duplicate entries in your data.",
-        })
-      }
-
-      // Check for impossible combinations (e.g., school closed for morning but open for afternoon)
+      // Check for impossible combinations
       for (let i = 0; i < marks.length; i += 2) {
         const morningMark = marks[i]
         const afternoonMark = marks[i + 1]
 
-        if (i + 1 >= marks.length) continue // Skip if no afternoon mark
+        if (i + 1 >= marks.length) continue
 
         // School closed in morning but open in afternoon
         if (morningMark === "#" && afternoonMark !== "#") {
@@ -421,49 +437,68 @@ const AttendanceParser: React.FC = () => {
 
           detectedAnomalies.push({
             type: "error",
-            message: "Inconsistent school closure",
-            details: "School is marked as closed in the morning but open in the afternoon.",
+            message: "Mixed school closure",
+            details: "School closed in morning but open in afternoon.",
             date: anomalyDate.toISOString().split("T")[0],
-            suggestion: "School closure typically applies to the entire day. Check if this is correct.",
+            suggestion: "School closures usually apply to the whole day.",
           })
         }
       }
 
-      // Check for unusual patterns
+      // Check for long absences (simplified)
       let consecutiveAbsences = 0
       for (let i = 0; i < marks.length; i += 2) {
         const morningMark = marks[i]
         const afternoonMark = marks[i + 1]
 
-        // Skip weekends and holidays
+        // Skip school closed days
         if (morningMark === "#" && afternoonMark === "#") {
           consecutiveAbsences = 0
           continue
         }
 
-        // Check for absence
+        // Check if absent (not present codes)
         if (morningMark !== "/" && afternoonMark !== "\\") {
           consecutiveAbsences++
 
-          if (consecutiveAbsences >= 3) {
-            const dayIndex = Math.floor(i / 2) - 2 // Start of the consecutive absences
+          if (consecutiveAbsences >= 5) {
+            const dayIndex = Math.floor(i / 2) - 4
             const anomalyDate = new Date(start_date)
             anomalyDate.setDate(start_date.getDate() + dayIndex)
 
             detectedAnomalies.push({
               type: "info",
-              message: "Extended absence detected",
-              details: `Found ${consecutiveAbsences} consecutive days of absence.`,
+              message: "Long absence period",
+              details: `${consecutiveAbsences} days absent in a row.`,
               date: anomalyDate.toISOString().split("T")[0],
-              suggestion: "Check if this extended absence is correctly recorded.",
+              suggestion: "Double-check this extended absence is correct.",
             })
 
-            // Reset to avoid duplicate alerts
-            consecutiveAbsences = 0
+            consecutiveAbsences = 0 // Reset to avoid duplicates
           }
         } else {
           consecutiveAbsences = 0
         }
+      }
+
+      // Check for very short date ranges with lots of data
+      if (daysInRange <= 3 && actualMarks > 20) {
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Date range seems too short",
+          details: `Only ${daysInRange} days selected but ${actualMarks} attendance codes provided.`,
+          suggestion: "Check if your end date is correct.",
+        })
+      }
+
+      // Check for very long strings with short date ranges
+      if (daysInRange <= 7 && actualMarks > 50) {
+        detectedAnomalies.push({
+          type: "warning",
+          message: "Way too much data for date range",
+          details: `${actualMarks} codes for only ${daysInRange} days doesn't make sense.`,
+          suggestion: "Your end date might be wrong, or you have extra data.",
+        })
       }
 
       return detectedAnomalies
